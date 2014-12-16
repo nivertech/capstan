@@ -9,6 +9,7 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/cloudius-systems/capstan/core"
 	"github.com/cloudius-systems/capstan/hypervisor/gce"
 	"github.com/cloudius-systems/capstan/hypervisor/qemu"
 	"github.com/cloudius-systems/capstan/hypervisor/vbox"
@@ -16,8 +17,10 @@ import (
 	"github.com/cloudius-systems/capstan/image"
 	"github.com/cloudius-systems/capstan/nat"
 	"github.com/cloudius-systems/capstan/util"
+	"io/ioutil"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -32,6 +35,8 @@ type RunConfig struct {
 	Networking   string
 	Bridge       string
 	NatRules     []nat.Rule
+	GCEUploadDir string
+	MAC          string
 }
 
 func Run(repo *util.Repo, config *RunConfig) error {
@@ -46,7 +51,7 @@ func Run(repo *util.Repo, config *RunConfig) error {
 
 			fmt.Printf("Created instance: %s\n", instanceName)
 			// Do not set RawTerm for gce
-			if (instancePlatform != "gce") {
+			if instancePlatform != "gce" {
 				util.RawTerm()
 				defer util.ResetTerm()
 			}
@@ -54,16 +59,28 @@ func Run(repo *util.Repo, config *RunConfig) error {
 			var err error
 			switch instancePlatform {
 			case "qemu":
-				c, _ := qemu.LoadConfig(instanceName)
+				c, err := qemu.LoadConfig(instanceName)
+				if err != nil {
+					return err
+				}
 				cmd, err = qemu.LaunchVM(c)
 			case "vbox":
-				c, _ := vbox.LoadConfig(instanceName)
+				c, err := vbox.LoadConfig(instanceName)
+				if err != nil {
+					return err
+				}
 				cmd, err = vbox.LaunchVM(c)
 			case "vmw":
-				c, _ := vmw.LoadConfig(instanceName)
+				c, err := vmw.LoadConfig(instanceName)
+				if err != nil {
+					return err
+				}
 				cmd, err = vmw.LaunchVM(c)
 			case "gce":
-				c, _ := gce.LoadConfig(instanceName)
+				c, err := gce.LoadConfig(instanceName)
+				if err != nil {
+					return err
+				}
 				cmd, err = gce.LaunchVM(c)
 			}
 
@@ -81,8 +98,8 @@ func Run(repo *util.Repo, config *RunConfig) error {
 			config.InstanceName = strings.Replace(config.InstanceName, "/", "-", -1)
 			return Run(repo, config)
 		}
-	// Both ImageName and InstanceName are specified
 	} else if config.ImageName != "" && config.InstanceName != "" {
+		// Both ImageName and InstanceName are specified
 		if _, err := os.Stat(config.ImageName); os.IsNotExist(err) {
 			if repo.ImageExists(config.Hypervisor, config.ImageName) {
 				path = repo.ImagePath(config.Hypervisor, config.ImageName)
@@ -97,32 +114,52 @@ func Run(repo *util.Repo, config *RunConfig) error {
 			} else {
 				return fmt.Errorf("%s: no such image", config.ImageName)
 			}
+			if config.Hypervisor == "gce" && !image.IsCloudImage(config.ImageName) {
+				str, err := ioutil.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				path = strings.Replace(string(str), "\n", "", -1)
+			}
 		} else {
-			path = config.ImageName
+			if strings.HasSuffix(config.ImageName, ".jar") {
+				config, err = buildJarImage(repo, config)
+				if err != nil {
+					return err
+				}
+				path = repo.ImagePath(config.Hypervisor, config.ImageName)
+			} else {
+				path = config.ImageName
+			}
 		}
 		deleteInstance(config.InstanceName)
-
-	// Valid only when Capstanfile is present
 	} else if config.ImageName == "" && config.InstanceName == "" {
+		// Valid only when Capstanfile is present
 		config.ImageName = repo.DefaultImage()
 		config.InstanceName = config.ImageName
 		if config.ImageName == "" {
 			return fmt.Errorf("No Capstanfile found, unable to run.")
 		}
 		if !repo.ImageExists(config.Hypervisor, config.ImageName) {
-			if !util.ConfigExists("Capstanfile") {
+			if !core.IsTemplateFile("Capstanfile") {
 				return fmt.Errorf("%s: no such image", config.ImageName)
 			}
-			err := Build(repo, config.Hypervisor, config.ImageName, config.Verbose)
+			image := &core.Image{
+				Name:       config.ImageName,
+				Hypervisor: config.Hypervisor,
+			}
+			template, err := core.ReadTemplateFile("Capstanfile")
 			if err != nil {
+				return err
+			}
+			if err := Build(repo, image, template, config.Verbose, config.Memory); err != nil {
 				return err
 			}
 		}
 		path = repo.ImagePath(config.Hypervisor, config.ImageName)
 		deleteInstance(config.InstanceName)
-
-		// Cmdline option is not valid
 	} else {
+		// Cmdline option is not valid
 		usage()
 		return nil
 	}
@@ -143,14 +180,14 @@ func Run(repo *util.Repo, config *RunConfig) error {
 	id := config.InstanceName
 	fmt.Printf("Created instance: %s\n", id)
 	// Do not set RawTerm for gce
-	if (config.Hypervisor != "gce") {
+	if config.Hypervisor != "gce" {
 		util.RawTerm()
 		defer util.ResetTerm()
 	}
 
 	switch config.Hypervisor {
 	case "qemu":
-		dir := filepath.Join(os.Getenv("HOME"), ".capstan/instances/qemu", id)
+		dir := filepath.Join(util.HomePath(), ".capstan/instances/qemu", id)
 		bridge := config.Bridge
 		if bridge == "" {
 			bridge = "virbr0"
@@ -168,6 +205,7 @@ func Run(repo *util.Repo, config *RunConfig) error {
 			InstanceDir: dir,
 			Monitor:     filepath.Join(dir, "osv.monitor"),
 			ConfigFile:  filepath.Join(dir, "osv.config"),
+			MAC:         config.MAC,
 		}
 		cmd, err = qemu.LaunchVM(config)
 	case "vbox":
@@ -189,6 +227,7 @@ func Run(repo *util.Repo, config *RunConfig) error {
 			Bridge:     bridge,
 			NatRules:   config.NatRules,
 			ConfigFile: filepath.Join(dir, "osv.config"),
+			MAC:        config.MAC,
 		}
 		cmd, err = vbox.LaunchVM(config)
 	case "gce":
@@ -196,24 +235,23 @@ func Run(repo *util.Repo, config *RunConfig) error {
 			return fmt.Errorf("%s: image format of %s is not supported, unable to run it.", config.Hypervisor, path)
 		}
 		dir := filepath.Join(util.HomePath(), ".capstan/instances/gce", id)
-		bucket := "osvimg"
-		config := &gce.VMConfig{
-			Name:             id,
-			Image:		  id,
-			Network:          "default",
-			MachineType:      "n1-standard-1",
-			Zone:             "us-central1-a",
-			ConfigFile:	  filepath.Join(dir, "osv.config"),
-			InstanceDir:	  dir,
+		c := &gce.VMConfig{
+			Name:        id,
+			Image:       id,
+			Network:     "default",
+			MachineType: "n1-standard-1",
+			Zone:        "us-central1-a",
+			ConfigFile:  filepath.Join(dir, "osv.config"),
+			InstanceDir: dir,
 		}
 		if format == image.GCE_TARBALL {
-			config.CloudStoragePath = "gs://" + bucket + "/" + id + ".tar.gz"
-			config.Tarball = path
+			c.CloudStoragePath = strings.TrimSuffix(config.GCEUploadDir, "/") + "/" + id + ".tar.gz"
+			c.Tarball = path
 		} else {
-			config.CloudStoragePath = path
-			config.Tarball = ""
+			c.CloudStoragePath = path
+			c.Tarball = ""
 		}
-		cmd, err = gce.LaunchVM(config)
+		cmd, err = gce.LaunchVM(c)
 	case "vmw":
 		if format != image.VMDK {
 			return fmt.Errorf("%s: image format of %s is not supported, unable to run it.", config.Hypervisor, path)
@@ -243,6 +281,36 @@ func Run(repo *util.Repo, config *RunConfig) error {
 	} else {
 		return nil
 	}
+}
+
+func buildJarImage(repo *util.Repo, config *RunConfig) (*RunConfig, error) {
+	jarPath := config.ImageName
+	imageName, jarName := parseJarNames(jarPath)
+	image := &core.Image{
+		Name:       imageName,
+		Hypervisor: config.Hypervisor,
+	}
+	targetJarPath := "/" + jarName
+	template := &core.Template{
+		Base:    "cloudius/osv-openjdk",
+		Cmdline: fmt.Sprintf("/java.so -jar %s", targetJarPath),
+		Files: map[string]string{
+			targetJarPath: jarPath,
+		},
+	}
+	if err := Build(repo, image, template, config.Verbose, config.Memory); err != nil {
+		return nil, err
+	}
+	newConfig := *config
+	newConfig.ImageName = imageName
+	newConfig.InstanceName = imageName
+	return &newConfig, nil
+}
+
+func parseJarNames(filename string) (string, string) {
+	jarName := path.Base(filename)
+	imageName := strings.TrimSuffix(jarName, ".jar")
+	return imageName, jarName
 }
 
 func usage() {

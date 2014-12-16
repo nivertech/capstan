@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v1"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,7 @@ type VMConfig struct {
 	Bridge     string
 	NatRules   []nat.Rule
 	ConfigFile string
+	MAC        string
 }
 
 func LaunchVM(c *VMConfig) (*exec.Cmd, error) {
@@ -143,10 +145,23 @@ func vmCreate(c *VMConfig) error {
 	return nil
 }
 
+func (c *VMConfig) vmMAC() (net.HardwareAddr, error) {
+	if c.MAC != "" {
+		return net.ParseMAC(c.MAC)
+	}
+	return util.GenerateMAC()
+}
+
 func vmSetupNetworking(c *VMConfig) error {
 	switch c.Networking {
 	case "bridge":
 		return VBoxManage("modifyvm", c.Name, "--nic1", "bridged", "--bridgeadapter1", c.Bridge, "--nictype1", "virtio")
+	case "tap":
+		mac, err := c.vmMAC()
+		if err != nil {
+			return err
+		}
+		return VBoxManage("modifyvm", c.Name, "--nic1", "bridged", "--bridgeadapter1", c.Bridge, "--macaddress1", strings.Replace(mac.String(), ":", "", -1), "--nictype1", "virtio")
 	case "nat":
 		return vmSetupNAT(c)
 	}
@@ -174,10 +189,12 @@ func DeleteVM(name string) error {
 		ConfigFile: filepath.Join(dir, "osv.config"),
 	}
 
-	cmd := exec.Command("rm", "-f", c.ConfigFile)
+	sockFile := filepath.Join(dir, name + ".sock")
+
+	cmd := exec.Command("rm", "-f", c.ConfigFile, " ", sockFile)
 	_, err := cmd.Output()
 	if err != nil {
-		fmt.Printf("Failed to delete: %s", c.ConfigFile)
+		fmt.Printf("Failed to delete: %s, %s", c.ConfigFile, sockFile)
 		return err
 	}
 
@@ -190,13 +207,9 @@ func StopVM(name string) error {
 
 func VBoxManage(args ...string) error {
 	cmd := exec.Command("VBoxManage", args...)
-	err := cmd.Start()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("VBoxManage %s", args)
+		return fmt.Errorf("%s", string(out))
 	}
 	return nil
 }

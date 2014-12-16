@@ -16,7 +16,7 @@ import (
 	"testing"
 )
 
-func capstan(command []string, root string) *exec.Cmd {
+func runCapstan(command []string, root string) *exec.Cmd {
 	c := exec.Command("capstan", command...)
 	c.Env = append(os.Environ(), fmt.Sprintf("CAPSTAN_ROOT=%s", root))
 	return c
@@ -30,17 +30,17 @@ func TestCommandErrors(t *testing.T) {
 	defer os.RemoveAll(root)
 
 	m := map[string]string{
-		"build foo": "open Capstanfile: no such file or directory\n",
-		"build":     "usage: capstan build [image-name]\n",
-		"pull":      "usage: capstan pull [image-name]\n",
-		"push":      "usage: capstan push [image-name] [image-file]\n",
-		"push foo":  "usage: capstan push [image-name] [image-file]\n",
-		"rmi":       "usage: capstan rmi [image-name]\n",
-		"run foo":   "foo: no such image\n",
-		"run":       "No Capstanfile found, unable to run.\n",
+		"build foo":  "open Capstanfile: no such file or directory\n",
+		"build":      "usage: capstan build [image-name]\n",
+		"pull":       "usage: capstan pull [image-name]\n",
+		"import":     "usage: capstan import [image-name] [image-file]\n",
+		"import foo": "usage: capstan import [image-name] [image-file]\n",
+		"rmi":        "usage: capstan rmi [image-name]\n",
+		"run foo":    "foo: no such image\n",
+		"run":        "No Capstanfile found, unable to run.\n",
 	}
 	for key, value := range m {
-		cmd := capstan(strings.Fields(key), root)
+		cmd := runCapstan(strings.Fields(key), root)
 		out, err := cmd.Output()
 		if err != nil {
 			t.Errorf("capstan: %v", err)
@@ -51,7 +51,7 @@ func TestCommandErrors(t *testing.T) {
 	}
 }
 
-func TestPushCommand(t *testing.T) {
+func TestImportCommand(t *testing.T) {
 	root, err := ioutil.TempDir("", "capstan-root")
 	if err != nil {
 		t.Errorf("capstan: %v", err)
@@ -65,16 +65,16 @@ func TestPushCommand(t *testing.T) {
 		t.Errorf("capstan: %v", err)
 	}
 
-	cmd = capstan([]string{"push", "example", "example.qcow2"}, root)
+	cmd = runCapstan([]string{"import", "example", "example.qcow2"}, root)
 	out, err = cmd.Output()
 	if err != nil {
 		t.Errorf("capstan: %v", err)
 	}
-	if g, e := string(out), "Pushing example...\n"; g != e {
+	if g, e := string(out), "Importing example...\n"; g != e {
 		t.Errorf("capstan: want %q, got %q", e, g)
 	}
 
-	cmd = capstan([]string{"images"}, root)
+	cmd = runCapstan([]string{"images"}, root)
 	out, err = cmd.Output()
 	if err != nil {
 		t.Errorf("capstan: %v", err)
@@ -100,25 +100,25 @@ func TestRmiCommand(t *testing.T) {
 		t.Errorf("capstan: %v", err)
 	}
 
-	cmd = capstan([]string{"push", "example1", "example.qcow2"}, root)
+	cmd = runCapstan([]string{"import", "example1", "example.qcow2"}, root)
 	out, err = cmd.Output()
 	if err != nil {
 		t.Errorf("capstan: %v", err)
 	}
-	if g, e := string(out), "Pushing example1...\n"; g != e {
+	if g, e := string(out), "Importing example1...\n"; g != e {
 		t.Errorf("capstan: want %q, got %q", e, g)
 	}
 
-	cmd = capstan([]string{"push", "example2", "example.qcow2"}, root)
+	cmd = runCapstan([]string{"import", "example2", "example.qcow2"}, root)
 	out, err = cmd.Output()
 	if err != nil {
 		t.Errorf("capstan: %v", err)
 	}
-	if g, e := string(out), "Pushing example2...\n"; g != e {
+	if g, e := string(out), "Importing example2...\n"; g != e {
 		t.Errorf("capstan: want %q, got %q", e, g)
 	}
 
-	cmd = capstan([]string{"images"}, root)
+	cmd = runCapstan([]string{"images"}, root)
 	out, err = cmd.Output()
 	if err != nil {
 		t.Errorf("capstan: %v", err)
@@ -129,7 +129,7 @@ func TestRmiCommand(t *testing.T) {
 
 	}
 
-	cmd = capstan([]string{"rmi", "example1"}, root)
+	cmd = runCapstan([]string{"rmi", "example1"}, root)
 	out, err = cmd.Output()
 	if err != nil {
 		t.Errorf("capstan: %v", err)
@@ -139,7 +139,7 @@ func TestRmiCommand(t *testing.T) {
 
 	}
 
-	cmd = capstan([]string{"images"}, root)
+	cmd = runCapstan([]string{"images"}, root)
 	out, err = cmd.Output()
 	if err != nil {
 		t.Errorf("capstan: %v", err)

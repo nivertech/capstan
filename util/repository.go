@@ -10,7 +10,9 @@ package util
 import (
 	"errors"
 	"fmt"
+	"github.com/cloudius-systems/capstan/core"
 	"github.com/cloudius-systems/capstan/image"
+	"gopkg.in/yaml.v1"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -25,14 +27,22 @@ type Repo struct {
 func NewRepo() *Repo {
 	root := os.Getenv("CAPSTAN_ROOT")
 	if root == "" {
-		root = filepath.Join(os.Getenv("HOME"), "/.capstan/repository/")
+		root = filepath.Join(HomePath(), "/.capstan/repository/")
 	}
 	return &Repo{
 		Path: root,
 	}
 }
 
-func (r *Repo) PushImage(imageName string, file string) error {
+type ImageInfo struct {
+	FormatVersion string `yaml:"format_version"`
+	Version       string
+	Created       string
+	Description   string
+	Build         string
+}
+
+func (r *Repo) ImportImage(imageName string, file string, version string, created string, description string, build string) error {
 	format, err := image.Probe(file)
 	if err != nil {
 		return err
@@ -51,7 +61,7 @@ func (r *Repo) PushImage(imageName string, file string) error {
 	if _, err := os.Stat(file); os.IsNotExist(err) {
 		return errors.New(fmt.Sprintf("%s: no such file", file))
 	}
-	fmt.Printf("Pushing %s...\n", imageName)
+	fmt.Printf("Importing %s...\n", imageName)
 	dir := filepath.Dir(r.ImagePath(hypervisor, imageName))
 	err = os.MkdirAll(dir, 0775)
 	if err != nil {
@@ -61,6 +71,21 @@ func (r *Repo) PushImage(imageName string, file string) error {
 	dst := r.ImagePath(hypervisor, imageName)
 	cmd := CopyFile(file, dst)
 	_, err = cmd.Output()
+	if err != nil {
+		return err
+	}
+	info := ImageInfo{
+		FormatVersion: "1",
+		Version: version,
+		Created: created,
+		Description: description,
+		Build: build,
+	}
+	value, err := yaml.Marshal(info)
+	if err != nil {
+		return err
+	}
+	err = ioutil.WriteFile(filepath.Join(dir, "index.yaml"), value, 0644)
 	if err != nil {
 		return err
 	}
@@ -96,6 +121,7 @@ func (r *Repo) ListImages() {
 	for _, n := range namespaces {
 		images, _ := ioutil.ReadDir(filepath.Join(r.Path, n.Name()))
 		nrImages := 0
+		nrFiles := 0
 		for _, i := range images {
 			if i.IsDir() {
 				info := MakeFileInfo(r.Path, n.Name(), i.Name())
@@ -105,17 +131,19 @@ func (r *Repo) ListImages() {
 					fmt.Println(info.String())
 				}
 				nrImages++
+			} else {
+				nrFiles++
 			}
 		}
 		// Image is directly at repository root with no namespace:
-		if nrImages == 0 && n.IsDir() {
+		if nrImages == 0 && nrFiles != 0 {
 			fmt.Println(n.Name())
 		}
 	}
 }
 
 func (r *Repo) DefaultImage() string {
-	if !ConfigExists("Capstanfile") {
+	if !core.IsTemplateFile("Capstanfile") {
 		return ""
 	}
 	pwd, err := os.Getwd()

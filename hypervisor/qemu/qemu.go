@@ -10,12 +10,9 @@ package qemu
 import (
 	"bufio"
 	"fmt"
-	"github.com/cloudius-systems/capstan/cpio"
 	"github.com/cloudius-systems/capstan/nat"
-	"github.com/cloudius-systems/capstan/nbd"
 	"github.com/cloudius-systems/capstan/util"
 	"gopkg.in/yaml.v1"
-	"io"
 	"io/ioutil"
 	"net"
 	"os"
@@ -24,7 +21,6 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
-	"strings"
 )
 
 type VMConfig struct {
@@ -40,160 +36,13 @@ type VMConfig struct {
 	InstanceDir string
 	Monitor     string
 	ConfigFile  string
+	MAC         string
 }
 
 type Version struct {
 	Major int
 	Minor int
 	Patch int
-}
-
-func UploadRPM(r *util.Repo, hypervisor string, image string, config *util.Config, verbose bool) error {
-	file := r.ImagePath(hypervisor, image)
-	vmconfig := &VMConfig{
-		Image:       file,
-		Verbose:     verbose,
-		Memory:      64,
-		Networking:  "nat",
-		NatRules:    []nat.Rule{nat.Rule{GuestPort: "10000", HostPort: "10000"}},
-		BackingFile: false,
-	}
-	qemu, err := LaunchVM(vmconfig)
-	if err != nil {
-		return err
-	}
-	defer qemu.Process.Kill()
-
-	conn, err := util.ConnectAndWait("tcp", "localhost:10000")
-	if err != nil {
-		return err
-	}
-
-	cmd := exec.Command("rpm2cpio", config.RpmBase.Filename())
-	cmd.Stdout = conn
-	err = cmd.Start()
-	if err != nil {
-		return err
-	}
-	defer cmd.Wait()
-
-	err = qemu.Wait()
-
-	conn.Close()
-
-	return err
-}
-
-func copyFile(conn net.Conn, src string, dst string) error {
-	fi, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	cpio.WritePadded(conn, cpio.ToWireFormat(dst, cpio.C_ISREG, fi.Size()))
-	b, err := ioutil.ReadFile(src)
-	cpio.WritePadded(conn, b)
-	return nil
-}
-
-func UploadFiles(r *util.Repo, hypervisor string, image string, config *util.Config, verbose bool) error {
-	file := r.ImagePath(hypervisor, image)
-	vmconfig := &VMConfig{
-		Image:       file,
-		Verbose:     verbose,
-		Memory:      64,
-		Networking:  "nat",
-		NatRules:    []nat.Rule{nat.Rule{GuestPort: "10000", HostPort: "10000"}},
-		BackingFile: false,
-	}
-	cmd, err := LaunchVM(vmconfig)
-	if err != nil {
-		return err
-	}
-	defer cmd.Process.Kill()
-
-	conn, err := util.ConnectAndWait("tcp", "localhost:10000")
-	if err != nil {
-		return err
-	}
-
-	if _, err = os.Stat(config.Rootfs); !os.IsNotExist(err) {
-		err = filepath.Walk(config.Rootfs, func(src string, info os.FileInfo, _ error) error {
-			if info.IsDir() {
-				return nil
-			}
-			dst := strings.Replace(src, config.Rootfs, "", -1)
-			if (verbose) {
-				fmt.Println(src + "  --> " + dst)
-			}
-			return copyFile(conn, src, dst)
-		})
-	}
-
-	for dst, src := range config.Files {
-		err = copyFile(conn, src, dst)
-		if (verbose) {
-			fmt.Println(src + "  --> " + dst)
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-
-	cpio.WritePadded(conn, cpio.ToWireFormat("TRAILER!!!", 0, 0))
-
-	conn.Close()
-	return cmd.Wait()
-}
-
-func SetArgs(r *util.Repo, hypervisor, image string, args string) error {
-	file := r.ImagePath(hypervisor, image)
-	cmd := exec.Command("qemu-nbd", file)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	err = cmd.Start()
-	if err != nil {
-		return err
-	}
-	go io.Copy(os.Stdout, stdout)
-	go io.Copy(os.Stderr, stderr)
-
-	conn, err := util.ConnectAndWait("tcp", "localhost:10809")
-	if err != nil {
-		return err
-	}
-
-	session := &nbd.NbdSession{
-		Conn:   conn,
-		Handle: 0,
-	}
-	if err := session.Handshake(); err != nil {
-		return err
-	}
-
-	padding := 512 - (len(args) % 512)
-
-	data := append([]byte(args), make([]byte, padding)...)
-
-	if err := session.Write(512, data); err != nil {
-		return err
-	}
-	if err := session.Flush(); err != nil {
-		return err
-	}
-	if err := session.Disconnect(); err != nil {
-		return err
-	}
-	conn.Close()
-	cmd.Wait()
-
-	return nil
 }
 
 func DeleteVM(name string) error {
@@ -286,7 +135,7 @@ func StoreConfig(c *VMConfig) error {
 	return ioutil.WriteFile(c.ConfigFile, data, 0644)
 }
 
-func LaunchVM(c *VMConfig, extra ...string) (*exec.Cmd, error) {
+func VMCommand(c *VMConfig, extra ...string) (*exec.Cmd, error) {
 	if c.BackingFile {
 		dir := c.InstanceDir
 		err := os.MkdirAll(dir, 0775)
@@ -316,7 +165,7 @@ func LaunchVM(c *VMConfig, extra ...string) (*exec.Cmd, error) {
 
 	StoreConfig(c)
 
-	version, err := probeVersion()
+	version, err := ProbeVersion()
 	if err != nil {
 		return nil, err
 	}
@@ -326,6 +175,14 @@ func LaunchVM(c *VMConfig, extra ...string) (*exec.Cmd, error) {
 	}
 	args := append(vmArgs, extra...)
 	cmd := exec.Command("qemu-system-x86_64", args...)
+	return cmd, nil
+}
+
+func LaunchVM(c *VMConfig, extra ...string) (*exec.Cmd, error) {
+	cmd, err := VMCommand(c, extra...)
+	if err != nil {
+		return nil, err
+	}
 	if c.Verbose {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -337,19 +194,23 @@ func LaunchVM(c *VMConfig, extra ...string) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
-func probeVersion() (*Version, error) {
+func ProbeVersion() (*Version, error) {
 	cmd := exec.Command("qemu-system-x86_64", "-version")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
-	r, err := regexp.Compile("QEMU emulator version (\\d+)\\.(\\d+)\\.(\\d+)")
+	return ParseVersion(string(out))
+}
+
+func ParseVersion(text string) (*Version, error) {
+	r, err := regexp.Compile("QEMU.*emulator version (\\d+)\\.(\\d+)(\\.)?(\\d?)?")
 	if err != nil {
 		return nil, err
 	}
-	version := r.FindStringSubmatch(string(out))
-	if len(version) != 4 {
-		return nil, fmt.Errorf("unable to parse QEMU version from '%s'", string(out))
+	version := r.FindStringSubmatch(text)
+	if len(version) < 5 {
+		return nil, fmt.Errorf("unable to parse QEMU version from '%s'", text)
 	}
 	major, err := strconv.Atoi(version[1])
 	if err != nil {
@@ -359,9 +220,12 @@ func probeVersion() (*Version, error) {
 	if err != nil {
 		return nil, err
 	}
-	patch, err := strconv.Atoi(version[3])
-	if err != nil {
-		return nil, err
+	patch := 0
+	if version[4] != "" {
+		patch, err = strconv.Atoi(version[4])
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &Version{
 		Major: major,
@@ -370,13 +234,20 @@ func probeVersion() (*Version, error) {
 	}, nil
 }
 
+func (c *VMConfig) vmDriveCache() string {
+	if util.IsDirectIOSupported(c.Image) {
+		return "none"
+	}
+	return "unsafe"
+}
+
 func (c *VMConfig) vmArguments(version *Version) ([]string, error) {
 	args := make([]string, 0)
 	args = append(args, "-display", "none")
 	args = append(args, "-m", strconv.FormatInt(c.Memory, 10))
 	args = append(args, "-smp", strconv.Itoa(c.Cpus))
 	args = append(args, "-device", "virtio-blk-pci,id=blk0,bootindex=0,drive=hd0")
-	args = append(args, "-drive", "file=" + c.Image + ",if=none,id=hd0,aio=native,cache=none")
+	args = append(args, "-drive", "file=" + c.Image + ",if=none,id=hd0,aio=native,cache=" + c.vmDriveCache())
 	if version.Major >= 1 && version.Minor >= 3 {
 		args = append(args, "-device", "virtio-rng-pci")
 	}
@@ -395,11 +266,22 @@ func (c *VMConfig) vmArguments(version *Version) ([]string, error) {
 	return args, nil
 }
 
+func (c *VMConfig) vmMAC() (net.HardwareAddr, error) {
+	if c.MAC != "" {
+		return net.ParseMAC(c.MAC)
+	}
+	return util.GenerateMAC()
+}
+
 func (c *VMConfig) vmNetworking() ([]string, error) {
 	args := make([]string, 0)
 	switch c.Networking {
 	case "bridge":
-		args = append(args, "-netdev", fmt.Sprintf("bridge,id=hn0,br=%s,helper=/usr/libexec/qemu-bridge-helper", c.Bridge), "-device", "virtio-net-pci,netdev=hn0,id=nic1")
+		mac, err := c.vmMAC()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "-netdev", fmt.Sprintf("bridge,id=hn0,br=%s,helper=/usr/libexec/qemu-bridge-helper", c.Bridge), "-device", fmt.Sprintf("virtio-net-pci,netdev=hn0,id=nic1,mac=%s", mac.String()))
 		return args, nil
 	case "nat":
 		args = append(args, "-netdev", "user,id=un0,net=192.168.122.0/24,host=192.168.122.1", "-device", "virtio-net-pci,netdev=un0")
@@ -407,6 +289,13 @@ func (c *VMConfig) vmNetworking() ([]string, error) {
 			redirect := fmt.Sprintf("tcp:%s::%s", portForward.HostPort, portForward.GuestPort)
 			args = append(args, "-redir", redirect)
 		}
+		return args, nil
+        case "tap":
+		mac, err := c.vmMAC()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "-netdev", fmt.Sprintf("tap,id=hn0,ifname=%s,script=no,downscript=no", c.Bridge), "-device", fmt.Sprintf("virtio-net-pci,netdev=hn0,id=nic1,mac=%s", mac.String()))
 		return args, nil
 	}
 	return nil, fmt.Errorf("%s: networking not supported", c.Networking)

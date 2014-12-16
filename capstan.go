@@ -10,6 +10,7 @@ package main
 import (
 	"fmt"
 	"github.com/cloudius-systems/capstan/cmd"
+	"github.com/cloudius-systems/capstan/core"
 	"github.com/cloudius-systems/capstan/hypervisor"
 	"github.com/cloudius-systems/capstan/nat"
 	"github.com/cloudius-systems/capstan/util"
@@ -37,18 +38,27 @@ func main() {
 					return
 				}
 				image := c.Args()[0]
-				cmd.Info(image)
+				err := cmd.Info(image)
+				if err != nil {
+					fmt.Println(err.Error())
+				}
 			},
 		},
 		{
-			Name:  "push",
-			Usage: "push an image to a repository",
+			Name:  "import",
+			Usage: "import an image to the local repository",
+			Flags: []cli.Flag{
+				cli.StringFlag{Name: "v", Value: "", Usage: "image version"},
+				cli.StringFlag{Name: "c", Value: "", Usage: "image creation date"},
+				cli.StringFlag{Name: "d", Value: "", Usage: "image description"},
+				cli.StringFlag{Name: "b", Value: "", Usage: "image build command"},
+			},
 			Action: func(c *cli.Context) {
 				if len(c.Args()) != 2 {
-					fmt.Println("usage: capstan push [image-name] [image-file]")
+					fmt.Println("usage: capstan import [image-name] [image-file]")
 					return
 				}
-				err := repo.PushImage(c.Args()[0], c.Args()[1])
+				err := repo.ImportImage(c.Args()[0], c.Args()[1], c.String("v"), c.String("c"), c.String("d"), c.String("b"))
 				if err != nil {
 					fmt.Println(err.Error())
 				}
@@ -58,14 +68,19 @@ func main() {
 			Name:  "pull",
 			Usage: "pull an image from a repository",
 			Flags: []cli.Flag{
-				cli.StringFlag{"p", hypervisor.Default(), "hypervisor"},
+				cli.StringFlag{Name: "p", Value: hypervisor.Default(), Usage: "hypervisor: qemu|vbox|vmw|gce"},
 			},
 			Action: func(c *cli.Context) {
 				if len(c.Args()) != 1 {
 					fmt.Println("usage: capstan pull [image-name]")
 					return
 				}
-				err := cmd.Pull(repo, c.String("p"), c.Args().First())
+				hypervisor := c.String("p")
+				if !isValidHypervisor(hypervisor) {
+					fmt.Printf("error: '%s' is not a supported hypervisor\n", c.String("p"))
+					return
+				}
+				err := cmd.Pull(repo, hypervisor, c.Args().First())
 				if err != nil {
 					fmt.Println(err.Error())
 				}
@@ -89,14 +104,16 @@ func main() {
 			Name:  "run",
 			Usage: "launch a VM. You may pass the image name as the first argument.",
 			Flags: []cli.Flag{
-				cli.StringFlag{"i", "", "image_name"},
-				cli.StringFlag{"p", hypervisor.Default(), "hypervisor: qemu|vbox|vmw|gce"},
-				cli.StringFlag{"m", "1G", "memory size"},
-				cli.IntFlag{"c", 2, "number of CPUs"},
-				cli.StringFlag{"n", "nat", "networking: nat|bridge"},
-				cli.BoolFlag{"v", "verbose mode"},
-				cli.StringFlag{"b", "", "networking bridge: e.g., virbr0, vboxnet0"},
-				cli.StringSliceFlag{"f", new(cli.StringSlice), "port forwarding rules"},
+				cli.StringFlag{Name: "i", Value: "", Usage: "image_name"},
+				cli.StringFlag{Name: "p", Value: hypervisor.Default(), Usage: "hypervisor: qemu|vbox|vmw|gce"},
+				cli.StringFlag{Name: "m", Value: "1G", Usage: "memory size"},
+				cli.IntFlag{Name: "c", Value: 2, Usage: "number of CPUs"},
+				cli.StringFlag{Name: "n", Value: "nat", Usage: "networking: nat|bridge|tap"},
+				cli.BoolFlag{Name: "v", Usage: "verbose mode"},
+				cli.StringFlag{Name: "b", Value: "", Usage: "networking device (bridge or tap): e.g., virbr0, vboxnet0, tap0"},
+				cli.StringSliceFlag{Name: "f", Value: new(cli.StringSlice), Usage: "port forwarding rules"},
+				cli.StringFlag{Name: "gce-upload-dir", Value: "", Usage: "Directory to upload local image to: e.g., gs://osvimg"},
+				cli.StringFlag{Name: "mac", Value: "", Usage: "MAC address. If not specified, the MAC address will be generated automatically."},
 			},
 			Action: func(c *cli.Context) {
 				config := &cmd.RunConfig{
@@ -109,6 +126,12 @@ func main() {
 					Networking:   c.String("n"),
 					Bridge:       c.String("b"),
 					NatRules:     nat.Parse(c.StringSlice("f")),
+					GCEUploadDir: c.String("gce-upload-dir"),
+					MAC:          c.String("mac"),
+				}
+				if !isValidHypervisor(config.Hypervisor) {
+					fmt.Printf("error: '%s' is not a supported hypervisor\n", config.Hypervisor)
+					return
 				}
 				err := cmd.Run(repo, config)
 				if err != nil {
@@ -120,29 +143,43 @@ func main() {
 			Name:  "build",
 			Usage: "build an image",
 			Flags: []cli.Flag{
-				cli.StringFlag{"p", hypervisor.Default(), "hypervisor"},
-				cli.BoolFlag{"v", "verbose mode"},
+				cli.StringFlag{Name: "p", Value: hypervisor.Default(), Usage: "hypervisor: qemu|vbox|vmw|gce"},
+				cli.StringFlag{Name: "m", Value: "512M", Usage: "memory size"},
+				cli.BoolFlag{Name: "v", Usage: "verbose mode"},
 			},
 			Action: func(c *cli.Context) {
-				image := c.Args().First()
+				imageName := c.Args().First()
 				if len(c.Args()) != 1 {
-					image = repo.DefaultImage()
+					imageName = repo.DefaultImage()
 				}
-				if image == "" {
+				if imageName == "" {
 					fmt.Println("usage: capstan build [image-name]")
 					return
 				}
 				hypervisor := c.String("p")
-				err := cmd.Build(repo, hypervisor, image, c.Bool("v"))
+				if !isValidHypervisor(hypervisor) {
+					fmt.Printf("error: '%s' is not a supported hypervisor\n", c.String("p"))
+					return
+				}
+				image := &core.Image{
+					Name:       imageName,
+					Hypervisor: hypervisor,
+				}
+				template, err := core.ReadTemplateFile("Capstanfile")
 				if err != nil {
 					fmt.Println(err.Error())
+					return
+				}
+				if err := cmd.Build(repo, image, template, c.Bool("v"), c.String("m")); err != nil {
+					fmt.Println(err.Error())
+					return
 				}
 			},
 		},
 		{
-			Name:  "images",
+			Name:      "images",
 			ShortName: "i",
-			Usage: "list images",
+			Usage:     "list images",
 			Action: func(c *cli.Context) {
 				repo.ListImages()
 			},
@@ -159,9 +196,9 @@ func main() {
 			},
 		},
 		{
-			Name:  "instances",
+			Name:      "instances",
 			ShortName: "I",
-			Usage: "list instances",
+			Usage:     "list instances",
 			Action: func(c *cli.Context) {
 				cmd.Instances()
 			},
@@ -192,4 +229,13 @@ func main() {
 		},
 	}
 	app.Run(os.Args)
+}
+
+func isValidHypervisor(hypervisor string) bool {
+	switch hypervisor {
+	case "qemu", "vbox", "vmw", "gce":
+		return true
+	default:
+		return false
+	}
 }

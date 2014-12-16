@@ -23,17 +23,17 @@ OSv support.
 You can install Capstan either by downloading pre-built binaries or building it
 from sources.
 
-### Prerequisites
+### Prerequisites: local
 
 You need to have a hypervisor such as QEMU/KVM or VirtualBox installed on your
-machine to launch OSv VMs.
+machine to run local OSv VMs.
 
 If you want to build your own OSv images, you need QEMU installed.
 
 On Fedora:
 
 ```
-$ sudo yum install qemu-system-x86
+$ sudo yum install qemu-system-x86 qemu-img
 ```
 
 On Debian/Ubuntu:
@@ -56,22 +56,18 @@ On OS X:
 $ brew install qemu
 ```
 
+### Prerequisites: Google Compute Engine
+
+To run your OSv images on Google Compute Engine, you will need the `gcutil` utility, which is part of the Google Cloud SDK.  Installation instructions are on the [gcutil home page](https://developers.google.com/compute/docs/gcutil/).
+
 ### Installing Binaries
 
 To install the binaries, make sure ``$HOME/bin`` is part of the ``PATH``
 environment variable and then download the  ``capstan`` executable and place it
 in ``$HOME/bin``.
 
-On Linux:
-
 ```
-$ mkdir -p $HOME/bin && curl http://osv.capstan.s3.amazonaws.com/capstan/v0.1.1/linux_amd64/capstan -o $HOME/bin/capstan && chmod u+x $HOME/bin/capstan
-```
-
-On OS X:
-
-```
-$ mkdir -p $HOME/bin && curl http://osv.capstan.s3.amazonaws.com/capstan/v0.1.1/darwin_amd64/capstan -o $HOME/bin/capstan && chmod u+x $HOME/bin/capstan
+$ curl https://raw.githubusercontent.com/cloudius-systems/capstan/master/scripts/download | bash
 ```
 
 ### Installing from Sources
@@ -146,15 +142,18 @@ To show a list of locally installed images, type:
 $ capstan images
 ```
 
+## Examples
+
+Check out the following example projects to get you going:
+
+* [Node.js](https://github.com/cloudius-systems/capstan-example-nodejs)
+* [Java](https://github.com/cloudius-systems/capstan-example-java)
+* [Clojure](https://github.com/cloudius-systems/capstan-example-clojure)
+* [Linux binaries](https://github.com/cloudius-systems/capstan-example)
+
 ## Documentation
 
 * [Capstanfile](Documentation/Capstanfile.md)
-
-## Examples
-
-* [Running native Linux apps on OSv](https://github.com/cloudius-systems/capstan-example)
-* [Running Java on OSv](https://github.com/penberg/capstan-example-java)
-* [Running Clojure on OSv](https://github.com/tzach/capstan-example-clojure)
 
 ## License
 
